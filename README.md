@@ -5,10 +5,10 @@
 [![UI](https://img.shields.io/badge/UI-Jetpack%20Compose%20M3-purple.svg)](https://developer.android.com/jetpack/compose)
 [![License](https://img.shields.io/badge/License-Apache%202.0-yellow.svg)](LICENSE)
 [![Architecture](https://img.shields.io/badge/Architecture-MVVM%20%2B%20Room-orange.svg)](#architecture)
-[![No-VPN](https://img.shields.io/badge/Mechanism-Native%20iptables%20%2F%20ADB-red.svg)](#native-blocking-mechanism)
+[![No-VPN](https://img.shields.io/badge/Mechanism-Native%20iptables%20%2F%20Connectivity-red.svg)](#native-blocking-mechanism)
 [![Display](https://img.shields.io/badge/Refresh%20Rate-120Hz%20Fluid%20(120fps)-cyan.svg)](#performance--fluidity)
 
-> **NetBlocker** is a battery-efficient, native per-application network firewall for Android. Unlike traditional VPN-based blockers that route entire device traffic through a virtual tunnel, NetBlocker uses **kernel-level `iptables` rules** and **Android OS native `netpolicy`/`appops` ADB shell controls**. It allows you to block **Wi-Fi**, **Mobile Data**, and **LAN / Ethernet** access individually for each app without running persistent background services.
+> **NetBlocker** is a battery-efficient, native per-application network firewall for Android. Unlike traditional VPN-based blockers that route entire device traffic through a virtual tunnel, NetBlocker uses **direct privileged executors** (Shizuku, One-Time ADB Helper Server, or Root) to invoke **real native Android OS network controls** (`cmd connectivity set-package-networking-enabled`, `set-uid-firewall-rule`, or kernel `iptables`).
 
 ---
 
@@ -16,96 +16,108 @@
 
 - **🚫 True Native Blocking (Zero VPN Overhead)**:
   - No continuous VPN notification icon.
-  - No battery drain from packet inspection loops.
-  - Can be used simultaneously with your favorite VPN (WireGuard, OpenVPN, Cloudflare 1.1.1.1, etc.).
-- **🎛️ Granular Interface Switches**:
-  - 📶 **Wi-Fi Blocking** (`wlan+`, `ap+` interfaces).
-  - 📱 **Mobile Cellular Data Blocking** (`rmnet+`, `ccmni+`, `pdp+` interfaces).
-  - 🔌 **LAN / Ethernet Blocking** (`eth+`, `usb+` interfaces).
-  - 🛑 **Master Switch** to toggle all outbound network traffic for an app in real time.
-- **⚡ Two Powerful Execution Modes**:
-  - **Root Mode (`su`)**: Direct on-device execution of IPv4 & IPv6 firewall rules via atomic custom chains (`NETBLOCKER_OUT`).
-  - **ADB Shell Mode (Non-Root)**: Uses native Android `cmd netpolicy` and `cmd appops` controls via PC, Wireless ADB, or Shizuku.
-- **📋 1-Click ADB Script Generator**:
-  - Generates ready-to-run `.sh` (Linux/macOS/Termux/Shizuku) and `.bat` (Windows) scripts.
-  - Single-app command copy for terminal pasting.
+  - 0% idle battery drain (no background packet capture loop).
+  - Fully compatible with WireGuard, OpenVPN, Cloudflare 1.1.1.1, or corporate VPNs.
+- **⚡ Three On-Device Privileged Executors**:
+  - **Shizuku Mode (No PC Needed)**: Executes commands via Shizuku UserService (`IShizukuService` IPC) directly as UID 2000 (`shell`).
+  - **One-Time ADB Helper Server**: Runs a lightweight `app_process` daemon on localhost with random token authentication. Stays alive until reboot; no PC needed after the initial command.
+  - **Root Mode (`su`)**: Direct kernel-level iptables control (`NETBLOCKER_OUT` custom chain) supporting per-interface Wi-Fi, Mobile Data, and LAN switches.
+- **🔍 Real OS-Level Rule Verification**:
+  - Every toggle immediately queries the matching get/query subcommand from Android OS to confirm that the rule took effect.
+  - Toggle states reflect real verified system state, not optimistic guesswork.
+- **📱 Clear On-Device Setup Screen**:
+  - Live status cards for Shizuku, One-Time ADB, and Root.
+  - Automatic device capability probing (Full, Partial, or Unsupported).
 - **⚡ 120fps Display Optimization**:
   - Dynamic display mode negotiation prioritizing **120Hz**, **90Hz**, and **60Hz** panels.
   - Zero-jank Jetpack Compose architecture with stable list keys and an in-memory LRU icon cache.
 - **🔄 Auto-Restore on Boot**:
-  - Optional `BootReceiver` restores active firewall rules immediately after device reboot.
-- **🔍 Built-in Diagnostics & Audit**:
-  - Live command execution logs with millisecond timestamps and exit codes.
-  - Real-time DNS socket ping tester to verify network drops.
+  - `BootReceiver` restores active firewall rules on reboot if an executor is available, or posts an actionable notification.
 
 ---
 
 ## 🏗️ Native Blocking Mechanism
 
-NetBlocker avoids the overhead of `VpnService` by applying rules directly at the operating system level:
+NetBlocker probes the device at startup using `cmd connectivity help` and selects the best supported native mechanism:
 
-### 1. Root / Kernel iptables Rules (Root Mode)
-NetBlocker creates and manages an isolated subchain `NETBLOCKER_OUT` linked to Android's `OUTPUT` chain:
+### 1. Preferred Native Control (Android 13+ / AOSP)
 ```bash
-# Initialize isolated chains (IPv4 & IPv6)
+# Block application network access
+cmd connectivity set-package-networking-enabled <PACKAGE_NAME> false
+
+# Restore application network access
+cmd connectivity set-package-networking-enabled <PACKAGE_NAME> true
+
+# Read back verified state
+cmd connectivity get-package-networking-enabled <PACKAGE_NAME>
+```
+
+### 2. UID Firewall Rule Chain (Android 11–12)
+```bash
+# Deny network access for UID
+cmd connectivity set-uid-firewall-rule restricted <UID> deny
+
+# Restore network access for UID
+cmd connectivity set-uid-firewall-rule restricted <UID> allow
+
+# Read back verified state
+cmd connectivity get-uid-firewall-rule restricted <UID>
+```
+
+### 3. Background Data Blacklist (Legacy Fallback)
+```bash
+# Restrict background metered data
+cmd netpolicy add restrict-background-blacklist <UID>
+
+# Remove restriction
+cmd netpolicy remove restrict-background-blacklist <UID>
+```
+
+### 4. Root Mode with Kernel iptables
+For rooted devices, NetBlocker creates an isolated custom chain `NETBLOCKER_OUT` enabling independent interface toggles:
+```bash
+# Initialize isolated chains
 iptables -N NETBLOCKER_OUT 2>/dev/null || true
 iptables -C OUTPUT -j NETBLOCKER_OUT 2>/dev/null || iptables -I OUTPUT 1 -j NETBLOCKER_OUT
 
-# Block specific UID on Wi-Fi
+# Block specific UID on Wi-Fi (wlan+)
 iptables -A NETBLOCKER_OUT -m owner --uid-owner <UID> -o wlan+ -j DROP
 
-# Block specific UID on Mobile Data
+# Block specific UID on Mobile Data (rmnet+)
 iptables -A NETBLOCKER_OUT -m owner --uid-owner <UID> -o rmnet+ -j DROP
 
-# Block specific UID on Ethernet / LAN
+# Block specific UID on Ethernet / LAN (eth+)
 iptables -A NETBLOCKER_OUT -m owner --uid-owner <UID> -o eth+ -j DROP
 
-# Block all network traffic for UID
-iptables -A NETBLOCKER_OUT -m owner --uid-owner <UID> -j DROP
-```
-
-### 2. Android Network Policy Controls (ADB Shell Non-Root Mode)
-For devices without root, NetBlocker uses Android's native framework commands accessible via ADB:
-```bash
-# Restrict background network rules for UID
-adb shell cmd netpolicy set restrict-background-rules <UID> 1
-
-# Exclude UID from metered networks (mobile data / tethering)
-adb shell cmd netpolicy set metered-network-allowlist <UID> false
-
-# Restrict app background execution ops
-adb shell cmd appops set <PACKAGE_NAME> RUN_IN_BACKGROUND ignore
-adb shell cmd appops set <PACKAGE_NAME> RUN_ANY_IN_BACKGROUND ignore
+# Verify rule existence
+iptables -C NETBLOCKER_OUT -m owner --uid-owner <UID> -j DROP
 ```
 
 ---
 
-## 🚀 Setup & Usage Guide
+## 🚀 Setup Guide
 
-### Method A: Root Access (Magisk / KernelSU / APatch)
-1. Install and open **NetBlocker**.
-2. When prompted, grant Superuser access to NetBlocker.
-3. Toggle the switch for any application you want to block.
-4. Customize Wi-Fi, Mobile Data, or LAN independently.
-5. Tap **Sync Rules** — rules take effect immediately.
+### Method A: Shizuku (Recommended, No PC Required)
+1. Install [Shizuku](https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api) from Google Play.
+2. Start Shizuku via **Wireless Debugging** in Developer Options.
+3. Open NetBlocker and tap **Setup Wizard**.
+4. Tap **Grant Shizuku Permission**.
+5. Once granted, all per-app toggles work instantly on your device!
 
-### Method B: Non-Root via PC ADB
-1. Enable **Developer Options** and **USB Debugging** on your Android device (`Settings > About Phone > Tap 'Build Number' 7 times`).
-2. Connect your device to your computer via USB.
-3. Verify connection:
+### Method B: One-Time PC ADB Helper
+1. Enable **USB Debugging** on your phone.
+2. Connect your phone to your computer.
+3. Open NetBlocker > **Setup Wizard** > **I have a PC**.
+4. Copy and execute the ONE command shown:
    ```bash
-   adb devices
+   adb shell sh /sdcard/Android/data/com.aistudio.netblocker.kfxqmw/files/start.sh
    ```
-4. In NetBlocker, select apps you wish to block, tap the **ADB Script** action pill, and tap **Copy Full Script**.
-5. Paste the commands into your terminal or run the generated script:
-   ```bash
-   adb shell < pasted_commands
-   ```
+5. The helper process (`netblocker_server`) will run in the background as the shell user until device restart. Disconnect from PC and use the app freely!
 
-### Method C: Non-Root On-Device (Wireless ADB / Shizuku / LADB)
-1. Turn on **Wireless Debugging** in Developer Options.
-2. Pair with **LADB**, **Termux**, or **Shizuku**.
-3. Paste the generated NetBlocker commands into the terminal directly on your phone.
+### Method C: Root Access (Magisk / KernelSU / APatch)
+1. Open NetBlocker.
+2. Grant Superuser privileges when prompted.
+3. Enjoy full firewall controls with granular Wi-Fi, Mobile Data, and LAN switches!
 
 ---
 
@@ -113,53 +125,56 @@ adb shell cmd appops set <PACKAGE_NAME> RUN_ANY_IN_BACKGROUND ignore
 
 ```
 com.example/
-├── NetBlockerApp.kt                # Application singleton & dependency wiring
+├── NetBlockerApp.kt                # Application singleton & executor wiring
 ├── MainActivity.kt                 # 120Hz display refresh optimizer & edge-to-edge host
+├── executor/
+│   ├── PrivilegedExecutor.kt       # Common abstraction interface & ExecResult
+│   ├── RootExecutor.kt             # su execution implementation
+│   ├── ShizukuExecutor.kt          # Shizuku UserService IPC implementation
+│   └── AdbHelperExecutor.kt        # Local socket client to app_process server
+├── shizuku/
+│   ├── IShizukuService.aidl        # AIDL contract for Shizuku privileged service
+│   └── ShizukuUserService.kt       # Bound privileged service implementation
+├── server/
+│   └── AdbHelperServer.kt          # Standalone app_process local socket server
+├── engine/
+│   ├── BlockingProbe.kt            # Probes device cmd connectivity subcommands
+│   └── NativeFirewallEngine.kt     # Command generators & verification state parsers
 ├── data/
 │   ├── model/
-│   │   ├── AppItem.kt              # App UI presentation model with icon & toggle states
+│   │   ├── AppItem.kt              # App UI model with toggles & cached icons
 │   │   ├── BlockedRule.kt          # Room entity for persisted firewall rules
-│   │   ├── CommandLog.kt           # Room entity for executed command audit trails
-│   │   └── FirewallMode.kt         # Enum (AUTO, ROOT, ADB_SHELL, SIMULATION)
+│   │   ├── CommandLog.kt           # Room entity for execution audit trails
+│   │   └── FirewallMode.kt         # Enum (AUTO, ROOT, SHIZUKU, ADB_HELPER, SIMULATION)
 │   ├── db/
-│   │   ├── NetBlockerDatabase.kt   # Room database definition
-│   │   ├── BlockedRuleDao.kt       # Rule CRUD & bulk queries
+│   │   ├── NetBlockerDatabase.kt   # Room database
+│   │   ├── BlockedRuleDao.kt       # Rule CRUD & persistence
 │   │   └── CommandLogDao.kt        # Command audit logging DAO
 │   └── repository/
 │       ├── AppRepository.kt        # PackageManager integration & LRU icon cache
-│       └── FirewallRepository.kt   # Command execution orchestrator & ping diagnostics
-├── engine/
-│   └── NativeFirewallEngine.kt     # iptables, ip6tables, and ADB script generator & runner
+│       └── FirewallRepository.kt   # Executor resolution & verified toggle engine
 ├── receiver/
-│   └── BootReceiver.kt             # Auto-reapplies firewall rules on device boot
+│   └── BootReceiver.kt             # Restores firewall rules or alerts on reboot
 └── ui/
-    ├── components/
-    │   ├── AppRowItem.kt           # Fluid, responsive app row with granular chips
-    │   ├── FirewallHeader.kt       # Real-time firewall status, counters & quick pills
-    │   ├── AppDetailsBottomSheet.kt# Detailed network inspector & per-app ADB command box
-    │   ├── AdbScriptDialog.kt      # Script previewer (.sh & .bat) with copy support
-    │   ├── CommandLogsDialog.kt    # System command execution log viewer
-    │   └── ModeSelectorDialog.kt   # Firewall engine mode picker
     ├── screens/
-    │   └── MainScreen.kt           # Central screen with search, filters, and list
-    ├── theme/
-    │   ├── Color.kt                # Cyberpunk-inspired minimalist palette
-    │   ├── Theme.kt                # Dynamic / M3 color scheme definitions
-    │   └── Type.kt                 # Typography definitions
-    └── viewmodel/
-        └── NetBlockerViewModel.kt  # MVVM StateFlow manager
+    │   ├── MainScreen.kt           # Main screen with status chips, search, and list
+    │   └── SetupScreen.kt          # Setup wizard with 3 cards (Shizuku, PC, Root)
+    └── components/
+        ├── AppRowItem.kt           # Fluid, responsive app row
+        ├── FirewallHeader.kt       # Status banner, counters & setup trigger
+        └── AppDetailsBottomSheet.kt# In-depth network inspector & command copy
 ```
 
 ---
 
 ## 🛠️ Technical Dependencies
 
-- **Android SDK**: `minSdk 24` (Android 7.0), `compileSdk 36`, `targetSdk 36`
+- **Android SDK**: `minSdk 24`, `compileSdk 36`, `targetSdk 36`
 - **Kotlin**: `2.2.10`
 - **Jetpack Compose**: Compose BOM `2024.09.00`
 - **Material Design 3**: `androidx.compose.material3`
+- **Shizuku API**: `dev.rikka.shizuku:api:13.1.5` & `dev.rikka.shizuku:provider:13.1.5`
 - **Local Persistence**: AndroidX Room `2.7.0` (with KSP code generation)
-- **Concurrency**: Kotlin Coroutines & StateFlow `1.10.2`
 - **Build System**: Gradle 9+ (Kotlin DSL `.gradle.kts`)
 
 ---
@@ -182,24 +197,7 @@ gradle :app:testDebugUnitTest
 
 ## 🤝 Contribution Guidelines
 
-We welcome contributions! To contribute:
-
-1. **Fork** the repository.
-2. Create a feature branch:
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
-3. Commit your changes:
-   ```bash
-   git commit -m "feat: add support for nftables syntax"
-   ```
-4. Push to your branch:
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-5. Open a **Pull Request**.
-
-Please ensure your code builds without warnings via `gradle compileDebugKotlin`.
+We welcome pull requests! Please follow standard Kotlin style guidelines and verify builds with `gradle compileDebugKotlin` before submitting.
 
 ---
 

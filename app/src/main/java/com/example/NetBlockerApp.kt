@@ -5,6 +5,9 @@ import com.example.data.db.NetBlockerDatabase
 import com.example.data.repository.AppRepository
 import com.example.data.repository.FirewallRepository
 import com.example.engine.NativeFirewallEngine
+import com.example.executor.AdbHelperExecutor
+import com.example.executor.RootExecutor
+import com.example.executor.ShizukuExecutor
 
 class NetBlockerApp : Application() {
 
@@ -12,6 +15,15 @@ class NetBlockerApp : Application() {
         private set
 
     lateinit var firewallEngine: NativeFirewallEngine
+        private set
+
+    lateinit var rootExecutor: RootExecutor
+        private set
+
+    lateinit var shizukuExecutor: ShizukuExecutor
+        private set
+
+    lateinit var adbHelperExecutor: AdbHelperExecutor
         private set
 
     lateinit var firewallRepository: FirewallRepository
@@ -26,7 +38,21 @@ class NetBlockerApp : Application() {
 
         database = NetBlockerDatabase.getInstance(this)
         firewallEngine = NativeFirewallEngine(this)
-        firewallRepository = FirewallRepository(database.commandLogDao(), firewallEngine)
+        rootExecutor = RootExecutor()
+        shizukuExecutor = ShizukuExecutor(this)
+        adbHelperExecutor = AdbHelperExecutor(this)
+
+        // Ensure helper script is written to external files dir at startup
+        adbHelperExecutor.generateStartScript()
+
+        firewallRepository = FirewallRepository(
+            commandLogDao = database.commandLogDao(),
+            firewallEngine = firewallEngine,
+            rootExecutor = rootExecutor,
+            shizukuExecutor = shizukuExecutor,
+            adbHelperExecutor = adbHelperExecutor
+        )
+
         appRepository = AppRepository(
             context = this,
             blockedRuleDao = database.blockedRuleDao(),

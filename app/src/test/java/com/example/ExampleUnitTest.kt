@@ -2,8 +2,11 @@ package com.example
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import com.example.data.model.BlockedRule
+import com.example.data.model.AppItem
+import com.example.engine.BlockingStrategy
 import com.example.engine.NativeFirewallEngine
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -22,73 +25,86 @@ class ExampleUnitTest {
     }
 
     @Test
-    fun testIptablesScriptGeneration() {
-        val rules = listOf(
-            BlockedRule(
-                packageName = "com.test.app1",
-                appName = "Test App 1",
-                uid = 10123,
-                isBlocked = true,
-                blockWifi = true,
-                blockMobile = false,
-                blockLan = false
-            ),
-            BlockedRule(
-                packageName = "com.test.app2",
-                appName = "Test App 2",
-                uid = 10124,
-                isBlocked = true,
-                blockWifi = false,
-                blockMobile = true,
-                blockLan = true
-            )
+    fun testRootIptablesBlockCommand() {
+        val app = AppItem(
+            packageName = "com.test.app1",
+            appName = "Test App 1",
+            uid = 10123,
+            isSystemApp = false,
+            hasInternetPermission = true,
+            isBlocked = true,
+            blockWifi = true,
+            blockMobile = true,
+            blockLan = true
         )
 
-        val script = engine.buildIptablesScript(rules)
+        val cmd = engine.buildBlockCommand(app, BlockingStrategy.RootIptables)
+        assertTrue(cmd.contains("iptables -N NETBLOCKER_OUT"))
+        assertTrue(cmd.contains("--uid-owner 10123 -j DROP"))
 
-        assertTrue(script.contains("iptables -N NETBLOCKER_OUT"))
-        assertTrue(script.contains("--uid-owner 10123 -o wlan+ -j DROP"))
-        assertTrue(script.contains("--uid-owner 10124 -o rmnet+ -j DROP"))
-        assertTrue(script.contains("--uid-owner 10124 -o eth+ -j DROP"))
+        val queryCmd = engine.buildQueryCommand(app, BlockingStrategy.RootIptables)
+        assertTrue(queryCmd.contains("iptables -C NETBLOCKER_OUT -m owner --uid-owner 10123 -j DROP"))
+        assertTrue(engine.parseQueryState(app, BlockingStrategy.RootIptables, exitCode = 0, output = ""))
+        assertFalse(engine.parseQueryState(app, BlockingStrategy.RootIptables, exitCode = 1, output = ""))
     }
 
     @Test
-    fun testAdbShellScriptGeneration() {
-        val rules = listOf(
-            BlockedRule(
-                packageName = "com.test.browser",
-                appName = "Browser",
-                uid = 10099,
-                isBlocked = true,
-                blockWifi = true,
-                blockMobile = true,
-                blockLan = true
-            )
+    fun testPackageNetworkingCommand() {
+        val app = AppItem(
+            packageName = "com.test.browser",
+            appName = "Browser",
+            uid = 10099,
+            isSystemApp = false,
+            hasInternetPermission = true,
+            isBlocked = true
         )
 
-        val adbScript = engine.buildAdbShellScript(rules)
+        val blockCmd = engine.buildBlockCommand(app, BlockingStrategy.PackageNetworking())
+        assertEquals("cmd connectivity set-package-networking-enabled com.test.browser false", blockCmd)
 
-        assertTrue(adbScript.contains("cmd netpolicy set restrict-background-rules 10099 1"))
-        assertTrue(adbScript.contains("cmd appops set com.test.browser RUN_IN_BACKGROUND ignore"))
+        val unblockCmd = engine.buildUnblockCommand(app, BlockingStrategy.PackageNetworking())
+        assertEquals("cmd connectivity set-package-networking-enabled com.test.browser true", unblockCmd)
+
+        val queryCmd = engine.buildQueryCommand(app, BlockingStrategy.PackageNetworking())
+        assertEquals("cmd connectivity get-package-networking-enabled com.test.browser", queryCmd)
+
+        assertTrue(engine.parseQueryState(app, BlockingStrategy.PackageNetworking(), 0, "Package networking enabled: false"))
+        assertFalse(engine.parseQueryState(app, BlockingStrategy.PackageNetworking(), 0, "Package networking enabled: true"))
     }
 
     @Test
-    fun testWindowsBatchScriptGeneration() {
-        val rules = listOf(
-            BlockedRule(
-                packageName = "com.test.chat",
-                appName = "Chat",
-                uid = 10050,
-                isBlocked = true,
-                blockWifi = true,
-                blockMobile = true,
-                blockLan = true
-            )
+    fun testUidFirewallRuleCommand() {
+        val app = AppItem(
+            packageName = "com.test.app2",
+            appName = "App 2",
+            uid = 10555,
+            isSystemApp = false,
+            hasInternetPermission = true,
+            isBlocked = true
         )
 
-        val batScript = engine.buildWindowsBatScript(rules)
+        val blockCmd = engine.buildBlockCommand(app, BlockingStrategy.UidFirewallRule("restricted"))
+        assertEquals("cmd connectivity set-uid-firewall-rule restricted 10555 deny", blockCmd)
 
-        assertTrue(batScript.contains("@echo off"))
-        assertTrue(batScript.contains("adb shell cmd netpolicy set restrict-background-rules 10050 1"))
+        val unblockCmd = engine.buildUnblockCommand(app, BlockingStrategy.UidFirewallRule("restricted"))
+        assertEquals("cmd connectivity set-uid-firewall-rule restricted 10555 allow", unblockCmd)
+    }
+
+    @Test
+    fun testBackgroundBlacklistFallbackCommand() {
+        val app = AppItem(
+            packageName = "com.test.app3",
+            appName = "App 3",
+            uid = 10777,
+            isSystemApp = false,
+            hasInternetPermission = true,
+            isBlocked = true
+        )
+
+        val blockCmd = engine.buildBlockCommand(app, BlockingStrategy.BackgroundBlacklist)
+        assertEquals("cmd netpolicy add restrict-background-blacklist 10777", blockCmd)
+
+        val unblockCmd = engine.buildUnblockCommand(app, BlockingStrategy.BackgroundBlacklist)
+        assertEquals("cmd netpolicy remove restrict-background-blacklist 10777", unblockCmd)
     }
 }

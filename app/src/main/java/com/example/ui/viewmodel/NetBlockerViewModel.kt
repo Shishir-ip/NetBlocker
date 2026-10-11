@@ -11,14 +11,15 @@ import com.example.data.model.FilterType
 import com.example.data.model.FirewallMode
 import com.example.data.repository.AppRepository
 import com.example.data.repository.FirewallRepository
-import kotlinx.coroutines.Dispatchers
+import com.example.engine.CapabilityLevel
+import com.example.engine.ProbeResult
+import com.example.executor.ShizukuState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 data class FirewallStats(
     val totalApps: Int = 0,
@@ -29,20 +30,28 @@ data class FirewallStats(
 )
 
 class NetBlockerViewModel(
-    private val appRepository: AppRepository,
-    private val firewallRepository: FirewallRepository
+    val appRepository: AppRepository,
+    val firewallRepository: FirewallRepository
 ) : ViewModel() {
 
     val searchQuery = MutableStateFlow("")
     val selectedFilter = MutableStateFlow(FilterType.ALL)
     val firewallMode = MutableStateFlow(FirewallMode.AUTO)
+
+    val activeExecutorName: StateFlow<String> = firewallRepository.activeExecutorName
+    val probeResult: StateFlow<ProbeResult> = firewallRepository.currentProbe
+
     val isRootAvailable = MutableStateFlow(false)
+    val shizukuState = MutableStateFlow(ShizukuState.NOT_INSTALLED)
+    val isAdbHelperRunning = MutableStateFlow(false)
+
     val isExecuting = MutableStateFlow(false)
     val pingStatus = MutableStateFlow<Boolean?>(null)
     val isPinging = MutableStateFlow(false)
     val bannerMessage = MutableStateFlow<String?>(null)
 
     val selectedAppForDetail = MutableStateFlow<AppItem?>(null)
+    val showSetupScreen = MutableStateFlow(false)
     val showAdbScriptDialog = MutableStateFlow(false)
     val showLogsDialog = MutableStateFlow(false)
     val showModeDialog = MutableStateFlow(false)
@@ -50,10 +59,8 @@ class NetBlockerViewModel(
     val recentLogs: StateFlow<List<CommandLog>> = firewallRepository.recentLogs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Raw stream of all apps combined with database blocked rules
     private val rawAppsFlow = appRepository.observeAppItems()
 
-    // Filtered list based on search query and category tab
     val filteredApps: StateFlow<List<AppItem>> = combine(
         rawAppsFlow,
         searchQuery,
@@ -76,7 +83,6 @@ class NetBlockerViewModel(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Stats calculated from all installed apps
     val stats: StateFlow<FirewallStats> = rawAppsFlow.combine(MutableStateFlow(Unit)) { apps, _ ->
         val blockedList = apps.filter { it.isBlocked }
         FirewallStats(
@@ -89,21 +95,47 @@ class NetBlockerViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), FirewallStats())
 
     init {
-        checkRootStatus()
+        refreshExecutorsAndProbe()
     }
 
-    fun checkRootStatus() {
+    fun refreshExecutorsAndProbe() {
         viewModelScope.launch {
-            val root = firewallRepository.checkRoot()
-            isRootAvailable.value = root
+            isRootAvailable.value = firewallRepository.rootExecutor.isAvailable()
+            shizukuState.value = firewallRepository.shizukuExecutor.getShizukuState()
+            isAdbHelperRunning.value = firewallRepository.adbHelperExecutor.isAvailable()
+
+            val resolved = firewallRepository.resolveExecutor(firewallMode.value)
+            if (resolved == null && firewallMode.value != FirewallMode.SIMULATION) {
+                // If nothing set up, suggest opening setup screen
+                if (!isRootAvailable.value && shizukuState.value != ShizukuState.READY && !isAdbHelperRunning.value) {
+                    bannerMessage.value = "Setup required: select Shizuku, PC ADB, or Root."
+                }
+            } else {
+                val capability = firewallRepository.currentProbe.value.capabilityLevel
+                if (capability == CapabilityLevel.PARTIAL) {
+                    bannerMessage.value = "Notice: Running in partial mode (restricts background data only)."
+                } else if (capability == CapabilityLevel.UNSUPPORTED) {
+                    bannerMessage.value = "Warning: Current device does not support native non-root commands."
+                }
+            }
         }
     }
 
     fun toggleAppBlock(app: AppItem, isBlocked: Boolean) {
         viewModelScope.launch {
-            appRepository.toggleAppBlock(app, isBlocked)
-            // Auto re-apply rules
-            applyActiveRules()
+            isExecuting.value = true
+            try {
+                val verified = appRepository.toggleAppBlock(app, isBlocked, firewallMode.value)
+                if (verified == isBlocked) {
+                    bannerMessage.value = "${app.appName}: Verified ${if (verified) "Blocked" else "Allowed"}"
+                } else {
+                    bannerMessage.value = "${app.appName}: Rule mismatch (Requested: $isBlocked, Verified: $verified)"
+                }
+            } catch (e: Exception) {
+                bannerMessage.value = "Error: ${e.message}"
+            } finally {
+                isExecuting.value = false
+            }
         }
     }
 
@@ -114,46 +146,75 @@ class NetBlockerViewModel(
         blockLan: Boolean
     ) {
         viewModelScope.launch {
-            appRepository.updateAppNetworkToggles(app, blockWifi, blockMobile, blockLan)
-            applyActiveRules()
+            isExecuting.value = true
+            try {
+                appRepository.updateAppNetworkToggles(app, blockWifi, blockMobile, blockLan, firewallMode.value)
+                bannerMessage.value = "${app.appName}: Interface settings updated"
+            } catch (e: Exception) {
+                bannerMessage.value = "Error: ${e.message}"
+            } finally {
+                isExecuting.value = false
+            }
         }
     }
 
     fun blockAllFiltered() {
         viewModelScope.launch {
+            isExecuting.value = true
             val currentList = filteredApps.value
             if (currentList.isNotEmpty()) {
-                appRepository.blockAllApps(currentList)
-                applyActiveRules()
-                bannerMessage.value = "Blocked network access for ${currentList.size} apps."
+                appRepository.blockAllApps(currentList, firewallMode.value)
+                bannerMessage.value = "Applied block to ${currentList.size} apps."
             }
+            isExecuting.value = false
         }
     }
 
     fun unblockAll() {
         viewModelScope.launch {
-            appRepository.unblockAllApps()
-            firewallRepository.flushRules(asRoot = isRootAvailable.value)
+            isExecuting.value = true
+            appRepository.unblockAllApps(firewallMode.value)
             bannerMessage.value = "All applications unblocked."
+            isExecuting.value = false
         }
     }
 
-    fun applyActiveRules() {
+    fun syncActiveRules() {
         viewModelScope.launch {
             isExecuting.value = true
             try {
-                val rules = appRepository.getActiveBlockedRules()
-                val result = firewallRepository.applyRules(rules, firewallMode.value)
-                if (result.isSuccess) {
-                    bannerMessage.value = "Firewall rules synced successfully."
-                } else {
-                    bannerMessage.value = "Rule sync note: ${result.output.take(80)}"
-                }
+                val blockedApps = filteredApps.value.filter { it.isBlocked }
+                firewallRepository.syncAllRules(blockedApps, firewallMode.value)
+                bannerMessage.value = "Firewall rules synced and verified (${blockedApps.size} apps)."
             } catch (e: Exception) {
                 bannerMessage.value = "Failed to sync: ${e.message}"
             } finally {
                 isExecuting.value = false
             }
+        }
+    }
+
+    fun requestShizukuPermission() {
+        firewallRepository.shizukuExecutor.requestPermission()
+        refreshExecutorsAndProbe()
+    }
+
+    fun restartAdbHelperViaShizuku() {
+        viewModelScope.launch {
+            val result = firewallRepository.adbHelperExecutor.restartViaShizuku(firewallRepository.shizukuExecutor)
+            if (result.isSuccess) {
+                bannerMessage.value = "Helper started via Shizuku!"
+            } else {
+                bannerMessage.value = "Helper start note: ${result.output}"
+            }
+            refreshExecutorsAndProbe()
+        }
+    }
+
+    fun checkAdbHelper() {
+        viewModelScope.launch {
+            isAdbHelperRunning.value = firewallRepository.adbHelperExecutor.isAvailable()
+            refreshExecutorsAndProbe()
         }
     }
 
@@ -176,76 +237,12 @@ class NetBlockerViewModel(
         }
     }
 
-    fun getIptablesScript(): String {
-        val rules = filteredApps.value.map { app ->
-            BlockedRule(
-                packageName = app.packageName,
-                appName = app.appName,
-                uid = app.uid,
-                isBlocked = app.isBlocked,
-                blockWifi = app.blockWifi,
-                blockMobile = app.blockMobile,
-                blockLan = app.blockLan
-            )
-        }
-        return firewallRepository.getIptablesScript(rules)
-    }
-
-    fun getAdbScript(): String {
-        val rules = filteredApps.value.map { app ->
-            BlockedRule(
-                packageName = app.packageName,
-                appName = app.appName,
-                uid = app.uid,
-                isBlocked = app.isBlocked,
-                blockWifi = app.blockWifi,
-                blockMobile = app.blockMobile,
-                blockLan = app.blockLan
-            )
-        }
-        return firewallRepository.getAdbScript(rules)
-    }
-
-    fun getWindowsBatScript(): String {
-        val rules = filteredApps.value.map { app ->
-            BlockedRule(
-                packageName = app.packageName,
-                appName = app.appName,
-                uid = app.uid,
-                isBlocked = app.isBlocked,
-                blockWifi = app.blockWifi,
-                blockMobile = app.blockMobile,
-                blockLan = app.blockLan
-            )
-        }
-        return firewallRepository.getWindowsBatScript(rules)
-    }
-
-    fun getSingleAppAdbCommand(app: AppItem): String {
-        return firewallRepository.getSingleAppAdbCommand(
-            BlockedRule(
-                packageName = app.packageName,
-                appName = app.appName,
-                uid = app.uid,
-                isBlocked = app.isBlocked,
-                blockWifi = app.blockWifi,
-                blockMobile = app.blockMobile,
-                blockLan = app.blockLan
-            )
-        )
-    }
-
-    fun getSingleAppRootCommand(app: AppItem): String {
-        return firewallRepository.getSingleAppRootCommand(
-            BlockedRule(
-                packageName = app.packageName,
-                appName = app.appName,
-                uid = app.uid,
-                isBlocked = app.isBlocked,
-                blockWifi = app.blockWifi,
-                blockMobile = app.blockMobile,
-                blockLan = app.blockLan
-            )
+    fun getFallbackIptablesScript(): String {
+        return NetBlockerApp.instance.firewallEngine.buildFullScript(
+            filteredApps.value.map {
+                BlockedRule(it.packageName, it.appName, it.uid, it.isBlocked, it.blockWifi, it.blockMobile, it.blockLan)
+            },
+            firewallRepository.currentProbe.value.strategy
         )
     }
 

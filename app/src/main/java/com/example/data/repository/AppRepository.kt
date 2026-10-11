@@ -8,6 +8,7 @@ import androidx.collection.LruCache
 import com.example.data.db.BlockedRuleDao
 import com.example.data.model.AppItem
 import com.example.data.model.BlockedRule
+import com.example.data.model.FirewallMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -109,32 +110,53 @@ class AppRepository(
             sorted
         }
 
-    suspend fun toggleAppBlock(app: AppItem, isBlocked: Boolean) = withContext(Dispatchers.IO) {
-        val existingRule = blockedRuleDao.getRuleByPackage(app.packageName)
-        val newRule = BlockedRule(
-            packageName = app.packageName,
-            appName = app.appName,
-            uid = app.uid,
-            isBlocked = isBlocked,
-            blockWifi = existingRule?.blockWifi ?: true,
-            blockMobile = existingRule?.blockMobile ?: true,
-            blockLan = existingRule?.blockLan ?: true,
-            lastUpdated = System.currentTimeMillis()
-        )
-        blockedRuleDao.upsertRule(newRule)
-    }
+    /**
+     * Toggles an app's block state, verifies real OS rule, and stores verified state.
+     */
+    suspend fun toggleAppBlock(app: AppItem, isBlocked: Boolean, mode: FirewallMode): Boolean =
+        withContext(Dispatchers.IO) {
+            val verifiedState = firewallRepository.applyAppBlockWithVerification(app, isBlocked, mode)
+
+            val existingRule = blockedRuleDao.getRuleByPackage(app.packageName)
+            val newRule = BlockedRule(
+                packageName = app.packageName,
+                appName = app.appName,
+                uid = app.uid,
+                isBlocked = verifiedState,
+                blockWifi = existingRule?.blockWifi ?: true,
+                blockMobile = existingRule?.blockMobile ?: true,
+                blockLan = existingRule?.blockLan ?: true,
+                lastUpdated = System.currentTimeMillis()
+            )
+            blockedRuleDao.upsertRule(newRule)
+            verifiedState
+        }
 
     suspend fun updateAppNetworkToggles(
         app: AppItem,
         blockWifi: Boolean,
         blockMobile: Boolean,
-        blockLan: Boolean
+        blockLan: Boolean,
+        mode: FirewallMode
     ) = withContext(Dispatchers.IO) {
+        val updatedApp = app.copy(
+            blockWifi = blockWifi,
+            blockMobile = blockMobile,
+            blockLan = blockLan
+        )
+
+        // If the app is currently blocked, re-apply the updated interface rules
+        val verifiedState = if (app.isBlocked) {
+            firewallRepository.applyAppBlockWithVerification(updatedApp, true, mode)
+        } else {
+            false
+        }
+
         val newRule = BlockedRule(
             packageName = app.packageName,
             appName = app.appName,
             uid = app.uid,
-            isBlocked = app.isBlocked,
+            isBlocked = if (app.isBlocked) verifiedState else false,
             blockWifi = blockWifi,
             blockMobile = blockMobile,
             blockLan = blockLan,
@@ -143,23 +165,25 @@ class AppRepository(
         blockedRuleDao.upsertRule(newRule)
     }
 
-    suspend fun blockAllApps(apps: List<AppItem>) = withContext(Dispatchers.IO) {
-        val rules = apps.map { app ->
-            BlockedRule(
-                packageName = app.packageName,
-                appName = app.appName,
-                uid = app.uid,
-                isBlocked = true,
-                blockWifi = app.blockWifi,
-                blockMobile = app.blockMobile,
-                blockLan = app.blockLan,
-                lastUpdated = System.currentTimeMillis()
-            )
+    suspend fun blockAllApps(apps: List<AppItem>, mode: FirewallMode) = withContext(Dispatchers.IO) {
+        for (app in apps) {
+            toggleAppBlock(app, true, mode)
         }
-        blockedRuleDao.upsertRules(rules)
     }
 
-    suspend fun unblockAllApps() = withContext(Dispatchers.IO) {
+    suspend fun unblockAllApps(mode: FirewallMode) = withContext(Dispatchers.IO) {
+        val activeRules = blockedRuleDao.getActiveBlockedRulesList()
+        for (rule in activeRules) {
+            val dummyApp = AppItem(
+                packageName = rule.packageName,
+                appName = rule.appName,
+                uid = rule.uid,
+                isSystemApp = false,
+                hasInternetPermission = true,
+                isBlocked = true
+            )
+            firewallRepository.applyAppBlockWithVerification(dummyApp, false, mode)
+        }
         blockedRuleDao.unblockAll()
     }
 

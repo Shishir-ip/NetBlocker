@@ -23,28 +23,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Block
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.NetworkCell
-import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DividerDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.SheetState
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -73,13 +65,14 @@ import com.example.ui.theme.WifiBlue
 @Composable
 fun AppDetailsBottomSheet(
     app: AppItem,
+    isPerInterfaceSupported: Boolean,
+    activeStrategyDescription: String,
     onDismiss: () -> Unit,
     onToggleBlock: (Boolean) -> Unit,
     onToggleWifi: (Boolean) -> Unit,
     onToggleMobile: (Boolean) -> Unit,
     onToggleLan: (Boolean) -> Unit,
-    singleAppAdbCommand: String,
-    singleAppRootCommand: String,
+    singleAppNativeCommand: String,
     modifier: Modifier = Modifier
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -173,7 +166,7 @@ fun AppDetailsBottomSheet(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = if (app.isBlocked) "Network Blocked" else "Network Allowed",
                             fontWeight = FontWeight.Bold,
@@ -181,7 +174,7 @@ fun AppDetailsBottomSheet(
                             color = if (app.isBlocked) BlockedRed else AllowedGreen
                         )
                         Text(
-                            text = if (app.isBlocked) "Firewall is dropping outbound traffic" else "Normal internet connectivity enabled",
+                            text = if (app.isBlocked) "Firewall is actively cutting off network access" else "Standard network access is enabled",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -203,94 +196,101 @@ fun AppDetailsBottomSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Granular Interface Controls
-            Text(
-                text = "Network Interface Controls",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Choose specifically which connection types to drop for this application:",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (isPerInterfaceSupported) {
+                // Granular Interface Controls (Root mode only)
+                Text(
+                    text = "Granular Interface Controls (Root Mode)",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Control specific connection interfaces via kernel iptables rules:",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-            Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-            InterfaceToggleRow(
-                title = "Wi-Fi Network (wlan+)",
-                subtitle = "Blocks wireless router / hotspot connections",
-                icon = Icons.Default.Wifi,
-                accentColor = WifiBlue,
-                isBlocked = app.blockWifi,
-                enabled = app.isBlocked,
-                onToggle = { onToggleWifi(!app.blockWifi) },
-                testTag = "detail_toggle_wifi"
-            )
+                InterfaceToggleRow(
+                    title = "Wi-Fi Network (wlan+)",
+                    subtitle = "Blocks wireless router / hotspot traffic",
+                    icon = Icons.Default.Wifi,
+                    accentColor = WifiBlue,
+                    isBlocked = app.blockWifi,
+                    enabled = app.isBlocked,
+                    onToggle = { onToggleWifi(!app.blockWifi) },
+                    testTag = "detail_toggle_wifi"
+                )
 
-            Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-            InterfaceToggleRow(
-                title = "Mobile Cellular Data (rmnet+)",
-                subtitle = "Blocks LTE / 5G / 3G mobile operator data",
-                icon = Icons.Default.NetworkCell,
-                accentColor = MobileOrange,
-                isBlocked = app.blockMobile,
-                enabled = app.isBlocked,
-                onToggle = { onToggleMobile(!app.blockMobile) },
-                testTag = "detail_toggle_mobile"
-            )
+                InterfaceToggleRow(
+                    title = "Mobile Cellular Data (rmnet+)",
+                    subtitle = "Blocks 5G / LTE / 3G mobile operator data",
+                    icon = Icons.Default.NetworkCell,
+                    accentColor = MobileOrange,
+                    isBlocked = app.blockMobile,
+                    enabled = app.isBlocked,
+                    onToggle = { onToggleMobile(!app.blockMobile) },
+                    testTag = "detail_toggle_mobile"
+                )
 
-            Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-            InterfaceToggleRow(
-                title = "LAN / Ethernet (eth+)",
-                subtitle = "Blocks USB ethernet / docking station interfaces",
-                icon = Icons.Default.Lan,
-                accentColor = LanPurple,
-                isBlocked = app.blockLan,
-                enabled = app.isBlocked,
-                onToggle = { onToggleLan(!app.blockLan) },
-                testTag = "detail_toggle_lan"
-            )
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Direct ADB Command Box for this app
-            Text(
-                text = "Native ADB Shell Command",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Non-root ADB execution command to apply policy directly via terminal:",
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-
-            CommandCopyBox(
-                command = singleAppAdbCommand,
-                label = "Copy ADB Command",
-                onCopy = {
-                    copyToClipboard(context, singleAppAdbCommand, "ADB Command copied")
+                InterfaceToggleRow(
+                    title = "LAN / Ethernet (eth+)",
+                    subtitle = "Blocks USB ethernet / docking station interfaces",
+                    icon = Icons.Default.Lan,
+                    accentColor = LanPurple,
+                    isBlocked = app.blockLan,
+                    enabled = app.isBlocked,
+                    onToggle = { onToggleLan(!app.blockLan) },
+                    testTag = "detail_toggle_lan"
+                )
+            } else {
+                // Notice for non-root modes
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Info, contentDescription = null, tint = CyanPrimary, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Non-root mode uses OS network commands ($activeStrategyDescription). The master switch above controls all network access. Per-interface Wi-Fi/Mobile splits require Root mode with iptables.",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
-            )
+            }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Direct Root iptables Command Box
+            // Direct Native Shell Command preview
             Text(
-                text = "Root iptables Command",
+                text = "Native Execution Command",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Command executed directly on device:",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(8.dp))
 
             CommandCopyBox(
-                command = singleAppRootCommand,
-                label = "Copy iptables Command",
+                command = singleAppNativeCommand,
+                label = "Copy Command",
                 onCopy = {
-                    copyToClipboard(context, singleAppRootCommand, "iptables Command copied")
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("NetBlocker Command", singleAppNativeCommand))
+                    Toast.makeText(context, "Command copied!", Toast.LENGTH_SHORT).show()
                 }
             )
 
@@ -463,11 +463,4 @@ private fun BadgePill(text: String, color: Color) {
             color = color
         )
     }
-}
-
-private fun copyToClipboard(context: Context, text: String, message: String) {
-    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-    val clip = ClipData.newPlainText("NetBlocker Command", text)
-    clipboard.setPrimaryClip(clip)
-    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
 }

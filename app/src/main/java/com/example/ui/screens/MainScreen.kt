@@ -16,20 +16,19 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Security
@@ -45,34 +44,28 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Snackbar
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.FilterType
+import com.example.data.model.FirewallMode
 import com.example.ui.components.AdbScriptDialog
 import com.example.ui.components.AppDetailsBottomSheet
 import com.example.ui.components.AppRowItem
 import com.example.ui.components.CommandLogsDialog
 import com.example.ui.components.FirewallHeader
 import com.example.ui.components.ModeSelectorDialog
-import com.example.ui.theme.AllowedGreen
 import com.example.ui.theme.BlockedRed
 import com.example.ui.theme.CyanPrimary
 import com.example.ui.viewmodel.NetBlockerViewModel
@@ -83,10 +76,23 @@ fun MainScreen(
     viewModel: NetBlockerViewModel,
     modifier: Modifier = Modifier
 ) {
+    val showSetupScreen by viewModel.showSetupScreen.collectAsState()
+
+    if (showSetupScreen) {
+        SetupScreen(
+            viewModel = viewModel,
+            onBack = { viewModel.showSetupScreen.value = false },
+            modifier = modifier
+        )
+        return
+    }
+
     val searchQuery by viewModel.searchQuery.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
     val firewallMode by viewModel.firewallMode.collectAsState()
-    val isRootAvailable by viewModel.isRootAvailable.collectAsState()
+    val activeExecutorName by viewModel.activeExecutorName.collectAsState()
+    val probeResult by viewModel.probeResult.collectAsState()
+
     val isExecuting by viewModel.isExecuting.collectAsState()
     val isPinging by viewModel.isPinging.collectAsState()
     val pingStatus by viewModel.pingStatus.collectAsState()
@@ -101,6 +107,7 @@ fun MainScreen(
     val showModeDialog by viewModel.showModeDialog.collectAsState()
 
     val listState = rememberLazyListState()
+    val isPerInterfaceSupported = (activeExecutorName.contains("Root", ignoreCase = true) || firewallMode == FirewallMode.ROOT)
 
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -132,7 +139,7 @@ fun MainScreen(
                                 )
                             )
                             Text(
-                                text = "Native Network Firewall",
+                                text = "Native Non-VPN Firewall",
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -140,6 +147,17 @@ fun MainScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { viewModel.showSetupScreen.value = true },
+                        modifier = Modifier.testTag("topbar_setup_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Build,
+                            contentDescription = "Setup Privileged Access",
+                            tint = CyanPrimary
+                        )
+                    }
+
                     if (stats.blockedApps > 0) {
                         Box(
                             modifier = Modifier
@@ -154,7 +172,7 @@ fun MainScreen(
                                 color = BlockedRed
                             )
                         }
-                        Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -164,7 +182,7 @@ fun MainScreen(
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { viewModel.applyActiveRules() },
+                onClick = { viewModel.syncActiveRules() },
                 icon = {
                     if (isExecuting) {
                         CircularProgressIndicator(
@@ -175,7 +193,7 @@ fun MainScreen(
                     } else {
                         Icon(
                             imageVector = Icons.Default.ElectricBolt,
-                            contentDescription = "Sync Rules"
+                            contentDescription = "Sync & Verify Rules"
                         )
                     }
                 },
@@ -327,15 +345,16 @@ fun MainScreen(
                     FirewallHeader(
                         stats = stats,
                         mode = firewallMode,
-                        isRootAvailable = isRootAvailable,
+                        activeExecutorName = activeExecutorName,
+                        probeResult = probeResult,
                         isExecuting = isExecuting,
                         isPinging = isPinging,
                         pingStatus = pingStatus,
-                        onApplyRules = { viewModel.applyActiveRules() },
+                        onApplyRules = { viewModel.syncActiveRules() },
                         onBlockAll = { viewModel.blockAllFiltered() },
                         onUnblockAll = { viewModel.unblockAll() },
                         onTestPing = { viewModel.testConnectivity() },
-                        onOpenAdbScript = { viewModel.showAdbScriptDialog.value = true },
+                        onOpenSetup = { viewModel.showSetupScreen.value = true },
                         onOpenLogs = { viewModel.showLogsDialog.value = true },
                         onOpenModeSelector = { viewModel.showModeDialog.value = true }
                     )
@@ -367,13 +386,13 @@ fun MainScreen(
                         }
                     }
                 } else {
-                    // Efficient items with stable keys for 120fps/90fps smooth scrolling
                     items(
                         items = apps,
                         key = { it.packageName }
                     ) { app ->
                         AppRowItem(
                             app = app,
+                            isPerInterfaceSupported = isPerInterfaceSupported,
                             onToggleBlock = { isBlocked ->
                                 viewModel.toggleAppBlock(app, isBlocked)
                             },
@@ -408,7 +427,6 @@ fun MainScreen(
                     }
                 }
 
-                // Bottom spacer for FloatingActionButton padding
                 item(key = "bottom_spacer") {
                     Spacer(modifier = Modifier.height(72.dp))
                 }
@@ -420,10 +438,11 @@ fun MainScreen(
     selectedAppForDetail?.let { app ->
         AppDetailsBottomSheet(
             app = app,
+            isPerInterfaceSupported = isPerInterfaceSupported,
+            activeStrategyDescription = probeResult.description,
             onDismiss = { viewModel.selectedAppForDetail.value = null },
             onToggleBlock = { isBlocked ->
                 viewModel.toggleAppBlock(app, isBlocked)
-                // keep bottom sheet updated with new state
                 viewModel.selectedAppForDetail.value = app.copy(isBlocked = isBlocked)
             },
             onToggleWifi = { wifiBlocked ->
@@ -438,17 +457,20 @@ fun MainScreen(
                 viewModel.updateAppNetworkToggles(app, app.blockWifi, app.blockMobile, lanBlocked)
                 viewModel.selectedAppForDetail.value = app.copy(blockLan = lanBlocked)
             },
-            singleAppAdbCommand = viewModel.getSingleAppAdbCommand(app),
-            singleAppRootCommand = viewModel.getSingleAppRootCommand(app)
+            singleAppNativeCommand = com.example.NetBlockerApp.instance.firewallEngine.buildBlockCommand(
+                app,
+                probeResult.strategy
+            )
         )
     }
 
-    // ADB Script Export Dialog
+    // Fallback ADB Script Export Dialog (kept only as last resort)
     if (showAdbScriptDialog) {
+        val script = viewModel.getFallbackIptablesScript()
         AdbScriptDialog(
-            bashScript = viewModel.getAdbScript(),
-            windowsScript = viewModel.getWindowsBatScript(),
-            iptablesScript = viewModel.getIptablesScript(),
+            bashScript = script,
+            windowsScript = script,
+            iptablesScript = script,
             onDismiss = { viewModel.showAdbScriptDialog.value = false }
         )
     }
@@ -467,8 +489,11 @@ fun MainScreen(
     if (showModeDialog) {
         ModeSelectorDialog(
             currentMode = firewallMode,
-            isRootAvailable = isRootAvailable,
-            onSelectMode = { newMode -> viewModel.firewallMode.value = newMode },
+            isRootAvailable = viewModel.isRootAvailable.collectAsState().value,
+            onSelectMode = { newMode ->
+                viewModel.firewallMode.value = newMode
+                viewModel.refreshExecutorsAndProbe()
+            },
             onDismiss = { viewModel.showModeDialog.value = false }
         )
     }

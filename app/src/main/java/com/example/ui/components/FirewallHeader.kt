@@ -1,6 +1,5 @@
 package com.example.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -24,11 +23,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Lan
 import androidx.compose.material.icons.filled.NetworkCell
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SettingsSuggest
@@ -47,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
@@ -55,6 +53,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.FirewallMode
+import com.example.engine.CapabilityLevel
+import com.example.engine.ProbeResult
 import com.example.ui.theme.AllowedGreen
 import com.example.ui.theme.BlockedRed
 import com.example.ui.theme.CyanPrimary
@@ -67,7 +67,8 @@ import com.example.ui.viewmodel.FirewallStats
 fun FirewallHeader(
     stats: FirewallStats,
     mode: FirewallMode,
-    isRootAvailable: Boolean,
+    activeExecutorName: String,
+    probeResult: ProbeResult,
     isExecuting: Boolean,
     isPinging: Boolean,
     pingStatus: Boolean?,
@@ -75,7 +76,7 @@ fun FirewallHeader(
     onBlockAll: () -> Unit,
     onUnblockAll: () -> Unit,
     onTestPing: () -> Unit,
-    onOpenAdbScript: () -> Unit,
+    onOpenSetup: () -> Unit,
     onOpenLogs: () -> Unit,
     onOpenModeSelector: () -> Unit,
     modifier: Modifier = Modifier
@@ -90,6 +91,9 @@ fun FirewallHeader(
         ),
         label = "pulseAlpha"
     )
+
+    val isConfigured = (activeExecutorName != "None")
+    val capability = probeResult.capabilityLevel
 
     Card(
         modifier = modifier
@@ -135,7 +139,7 @@ fun FirewallHeader(
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = if (stats.blockedApps > 0) "Firewall Active" else "Native Engine Ready",
+                            text = if (stats.blockedApps > 0) "Firewall Active" else "NetBlocker Engine",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 fontWeight = FontWeight.Bold
                             )
@@ -146,15 +150,41 @@ fun FirewallHeader(
                                 .size(8.dp)
                                 .clip(CircleShape)
                                 .alpha(pulseAlpha)
-                                .background(if (stats.blockedApps > 0) BlockedRed else AllowedGreen)
+                                .background(if (stats.blockedApps > 0) BlockedRed else if (isConfigured) AllowedGreen else Color(0xFFFBBF24))
                         )
                     }
 
-                    Text(
-                        text = if (isRootAvailable) "Root Privileged (iptables)" else "Native ADB Shell / NetPolicy",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    // Status and capability chip (Clickable -> Opens Setup)
+                    Row(
+                        modifier = Modifier
+                            .padding(top = 2.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenSetup)
+                            .testTag("status_capability_chip"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isConfigured) activeExecutorName else "Not set up (Tap to config)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isConfigured) CyanPrimary else BlockedRed
+                        )
+                        Text(
+                            text = " • ",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = capability.displayName,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = when (capability) {
+                                CapabilityLevel.FULL -> AllowedGreen
+                                CapabilityLevel.PARTIAL -> Color(0xFFFBBF24)
+                                CapabilityLevel.UNSUPPORTED -> BlockedRed
+                            }
+                        )
+                    }
                 }
 
                 // Mode Selector Button
@@ -227,7 +257,15 @@ fun FirewallHeader(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 ActionPill(
-                    label = "Apply Rules",
+                    label = "Setup Wizard",
+                    icon = Icons.Default.Build,
+                    color = CyanPrimary,
+                    onClick = onOpenSetup,
+                    testTag = "pill_setup_wizard"
+                )
+
+                ActionPill(
+                    label = "Sync & Verify",
                     icon = Icons.Default.ElectricBolt,
                     color = CyanPrimary,
                     isLoading = isExecuting,
@@ -252,14 +290,6 @@ fun FirewallHeader(
                 )
 
                 ActionPill(
-                    label = "ADB Script",
-                    icon = Icons.Default.Code,
-                    color = WifiBlue,
-                    onClick = onOpenAdbScript,
-                    testTag = "pill_adb_script"
-                )
-
-                ActionPill(
                     label = "Command Logs",
                     icon = Icons.Default.Terminal,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -267,7 +297,6 @@ fun FirewallHeader(
                     testTag = "pill_command_logs"
                 )
 
-                // Ping Check Action
                 ActionPill(
                     label = when {
                         isPinging -> "Testing..."

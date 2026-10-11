@@ -1,118 +1,194 @@
 package com.example.data.repository
 
 import com.example.data.db.CommandLogDao
+import com.example.data.model.AppItem
 import com.example.data.model.BlockedRule
 import com.example.data.model.CommandLog
 import com.example.data.model.FirewallMode
-import com.example.engine.CommandResult
+import com.example.engine.BlockingProbe
+import com.example.engine.BlockingStrategy
+import com.example.engine.CapabilityLevel
 import com.example.engine.NativeFirewallEngine
+import com.example.engine.ProbeResult
+import com.example.executor.AdbHelperExecutor
+import com.example.executor.ExecResult
+import com.example.executor.PrivilegedExecutor
+import com.example.executor.RootExecutor
+import com.example.executor.ShizukuExecutor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
 
 class FirewallRepository(
     private val commandLogDao: CommandLogDao,
-    private val firewallEngine: NativeFirewallEngine
+    private val firewallEngine: NativeFirewallEngine,
+    val rootExecutor: RootExecutor,
+    val shizukuExecutor: ShizukuExecutor,
+    val adbHelperExecutor: AdbHelperExecutor
 ) {
 
     val recentLogs: Flow<List<CommandLog>> = commandLogDao.getRecentLogs()
 
-    suspend fun checkRoot(): Boolean {
-        return firewallEngine.isRootAvailable()
-    }
-
-    suspend fun applyRules(
-        rules: List<BlockedRule>,
-        mode: FirewallMode
-    ): CommandResult = withContext(Dispatchers.IO) {
-        when (mode) {
-            FirewallMode.ROOT -> {
-                val script = firewallEngine.buildIptablesScript(rules)
-                val result = firewallEngine.executeCommand(script, asRoot = true)
-                commandLogDao.insertLog(
-                    CommandLog(
-                        command = "Apply ${rules.count { it.isBlocked }} blocked rules via iptables",
-                        exitCode = result.exitCode,
-                        output = result.output.ifEmpty { "Rules applied successfully to $CHAIN_NAME chain." },
-                        mode = "ROOT"
-                    )
-                )
-                result
-            }
-
-            FirewallMode.ADB_SHELL -> {
-                val script = firewallEngine.buildAdbShellScript(rules)
-                // In ADB Shell mode, if root is present we can run cmd netpolicy directly, or user runs it via adb
-                val result = if (firewallEngine.isRootAvailable()) {
-                    firewallEngine.executeCommand(script, asRoot = true)
-                } else {
-                    CommandResult(
-                        exitCode = 0,
-                        output = "Script generated for ADB execution. ${rules.count { it.isBlocked }} policies ready."
-                    )
-                }
-                commandLogDao.insertLog(
-                    CommandLog(
-                        command = "Export / Run ADB netpolicy commands for ${rules.count { it.isBlocked }} apps",
-                        exitCode = result.exitCode,
-                        output = result.output,
-                        mode = "ADB_SHELL"
-                    )
-                )
-                result
-            }
-
-            FirewallMode.AUTO -> {
-                val isRoot = firewallEngine.isRootAvailable()
-                if (isRoot) {
-                    applyRules(rules, FirewallMode.ROOT)
-                } else {
-                    applyRules(rules, FirewallMode.ADB_SHELL)
-                }
-            }
-
-            FirewallMode.SIMULATION -> {
-                val script = firewallEngine.buildIptablesScript(rules)
-                val simulatedResult = CommandResult(
-                    exitCode = 0,
-                    output = "[SIMULATION] Validated rules for ${rules.count { it.isBlocked }} apps.\nSample generated command:\n${script.take(200)}..."
-                )
-                commandLogDao.insertLog(
-                    CommandLog(
-                        command = "[SIMULATION] Validate ${rules.count { it.isBlocked }} rules",
-                        exitCode = 0,
-                        output = simulatedResult.output,
-                        mode = "SIMULATION"
-                    )
-                )
-                simulatedResult
-            }
-        }
-    }
-
-    suspend fun flushRules(asRoot: Boolean): CommandResult = withContext(Dispatchers.IO) {
-        val script = firewallEngine.buildFlushScript()
-        val result = if (asRoot) {
-            firewallEngine.executeCommand(script, asRoot = true)
-        } else {
-            CommandResult(0, "Rules reset in memory.")
-        }
-        commandLogDao.insertLog(
-            CommandLog(
-                command = "Flush firewall chain ($CHAIN_NAME)",
-                exitCode = result.exitCode,
-                output = result.output.ifEmpty { "Chain flushed. All traffic allowed." },
-                mode = if (asRoot) "ROOT" else "NON_ROOT"
-            )
+    private val _currentProbe = MutableStateFlow(
+        ProbeResult(
+            strategy = BlockingStrategy.Unsupported,
+            capabilityLevel = CapabilityLevel.UNSUPPORTED,
+            description = "Probing device capability..."
         )
-        result
+    )
+    val currentProbe = _currentProbe.asStateFlow()
+
+    private val _activeExecutorName = MutableStateFlow("None")
+    val activeExecutorName = _activeExecutorName.asStateFlow()
+
+    /**
+     * Finds the active privileged executor according to the selected FirewallMode.
+     * AUTO prioritizes: Root > Shizuku > AdbHelper.
+     */
+    suspend fun resolveExecutor(mode: FirewallMode): PrivilegedExecutor? = withContext(Dispatchers.IO) {
+        val executor = when (mode) {
+            FirewallMode.ROOT -> if (rootExecutor.isAvailable()) rootExecutor else null
+            FirewallMode.SHIZUKU -> if (shizukuExecutor.isAvailable()) shizukuExecutor else null
+            FirewallMode.ADB_HELPER -> if (adbHelperExecutor.isAvailable()) adbHelperExecutor else null
+            FirewallMode.AUTO -> {
+                when {
+                    rootExecutor.isAvailable() -> rootExecutor
+                    shizukuExecutor.isAvailable() -> shizukuExecutor
+                    adbHelperExecutor.isAvailable() -> adbHelperExecutor
+                    else -> null
+                }
+            }
+            FirewallMode.SIMULATION -> null
+        }
+
+        _activeExecutorName.value = executor?.name ?: if (mode == FirewallMode.SIMULATION) "Simulation" else "None"
+
+        // Probe device with resolved executor
+        if (executor != null) {
+            val probeResult = BlockingProbe.probe(executor)
+            _currentProbe.value = probeResult
+        } else if (mode == FirewallMode.SIMULATION) {
+            _currentProbe.value = ProbeResult(
+                strategy = BlockingStrategy.PackageNetworking(),
+                capabilityLevel = CapabilityLevel.FULL,
+                description = "Simulation Mode (Dry Run)"
+            )
+        } else {
+            _currentProbe.value = ProbeResult(
+                strategy = BlockingStrategy.Unsupported,
+                capabilityLevel = CapabilityLevel.UNSUPPORTED,
+                description = "No active privileged executor configured"
+            )
+        }
+
+        executor
     }
 
     /**
-     * Checks if internet connectivity is reachable using a low-latency socket ping to DNS.
+     * Applies block/unblock for a single application and verifies real OS state.
+     * Returns the verified state (true if verified blocked, false if verified allowed).
      */
+    suspend fun applyAppBlockWithVerification(
+        app: AppItem,
+        shouldBlock: Boolean,
+        mode: FirewallMode
+    ): Boolean = withContext(Dispatchers.IO) {
+        val executor = resolveExecutor(mode)
+
+        if (mode == FirewallMode.SIMULATION) {
+            commandLogDao.insertLog(
+                CommandLog(
+                    command = "[SIMULATION] Set ${app.packageName} blocked = $shouldBlock",
+                    exitCode = 0,
+                    output = "Simulated action succeeded.",
+                    mode = "SIMULATION"
+                )
+            )
+            return@withContext shouldBlock
+        }
+
+        if (executor == null) {
+            commandLogDao.insertLog(
+                CommandLog(
+                    command = "Set ${app.packageName} blocked = $shouldBlock",
+                    exitCode = -1,
+                    output = "No privileged executor available (Root, Shizuku, or ADB Helper).",
+                    mode = mode.name
+                )
+            )
+            return@withContext false
+        }
+
+        val strategy = _currentProbe.value.strategy
+        val cmd = if (shouldBlock) {
+            firewallEngine.buildBlockCommand(app, strategy)
+        } else {
+            firewallEngine.buildUnblockCommand(app, strategy)
+        }
+
+        // Execute action
+        val execResult = executor.exec(cmd)
+        commandLogDao.insertLog(
+            CommandLog(
+                command = cmd,
+                exitCode = execResult.exitCode,
+                output = execResult.output.ifEmpty { "Success" },
+                mode = executor.name
+            )
+        )
+
+        // VERIFICATION: Read the rule back using the matching query subcommand
+        val queryCmd = firewallEngine.buildQueryCommand(app, strategy)
+        val queryResult = executor.exec(queryCmd)
+        val realState = firewallEngine.parseQueryState(app, strategy, queryResult.exitCode, queryResult.output)
+
+        commandLogDao.insertLog(
+            CommandLog(
+                command = "Verify: $queryCmd",
+                exitCode = queryResult.exitCode,
+                output = "Verified real state: ${if (realState) "BLOCKED" else "ALLOWED"} (Raw: ${queryResult.output.take(60)})",
+                mode = executor.name
+            )
+        )
+
+        realState
+    }
+
+    /**
+     * Applies rules for multiple apps.
+     */
+    suspend fun syncAllRules(
+        apps: List<AppItem>,
+        mode: FirewallMode
+    ): Map<String, Boolean> = withContext(Dispatchers.IO) {
+        val verifiedResults = mutableMapOf<String, Boolean>()
+        for (app in apps) {
+            val verified = applyAppBlockWithVerification(app, app.isBlocked, mode)
+            verifiedResults[app.packageName] = verified
+        }
+        verifiedResults
+    }
+
+    suspend fun flushAll(mode: FirewallMode): ExecResult = withContext(Dispatchers.IO) {
+        val executor = resolveExecutor(mode) ?: return@withContext ExecResult(-1, "No executor available")
+        val strategy = _currentProbe.value.strategy
+        val cmd = firewallEngine.buildFlushScript(strategy)
+        val res = executor.exec(cmd)
+        commandLogDao.insertLog(
+            CommandLog(
+                command = "Flush all firewall rules: $cmd",
+                exitCode = res.exitCode,
+                output = res.output,
+                mode = executor.name
+            )
+        )
+        res
+    }
+
     suspend fun testGlobalConnectivity(): Boolean = withContext(Dispatchers.IO) {
         try {
             Socket().use { socket ->
@@ -131,26 +207,7 @@ class FirewallRepository(
         }
     }
 
-    fun getIptablesScript(rules: List<BlockedRule>): String =
-        firewallEngine.buildIptablesScript(rules)
-
-    fun getAdbScript(rules: List<BlockedRule>): String =
-        firewallEngine.buildAdbShellScript(rules)
-
-    fun getWindowsBatScript(rules: List<BlockedRule>): String =
-        firewallEngine.buildWindowsBatScript(rules)
-
-    fun getSingleAppAdbCommand(rule: BlockedRule): String =
-        firewallEngine.getSingleAppAdbCommand(rule)
-
-    fun getSingleAppRootCommand(rule: BlockedRule): String =
-        firewallEngine.getSingleAppRootCommand(rule)
-
     suspend fun clearLogs() = withContext(Dispatchers.IO) {
         commandLogDao.clearLogs()
-    }
-
-    companion object {
-        const val CHAIN_NAME = NativeFirewallEngine.CHAIN_NAME
     }
 }

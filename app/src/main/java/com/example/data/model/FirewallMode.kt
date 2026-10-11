@@ -1,10 +1,11 @@
 package com.example.data.model
 
 enum class FirewallMode(val displayName: String, val description: String) {
-    AUTO("Auto-Detect", "Automatically use Root if available, or generate ADB commands"),
-    ROOT("Root (su)", "Direct execution of iptables rules via root access"),
-    ADB_SHELL("ADB Shell / Shizuku", "Native Android cmd netpolicy & privileged adb shell commands"),
-    SIMULATION("Test / Inspection Mode", "Preview and inspect generated network rules without executing")
+    AUTO("Auto-Detect", "Prioritizes Root > Shizuku > ADB Helper"),
+    ROOT("Root (su)", "Direct kernel-level iptables control via Superuser"),
+    SHIZUKU("Shizuku", "On-device privileged shell execution via Shizuku service"),
+    ADB_HELPER("ADB Helper", "Persistent local socket helper running via app_process"),
+    SIMULATION("Test / Simulation", "Inspect commands without modifying system state")
 }
 
 enum class FilterType(val label: String) {
